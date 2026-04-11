@@ -2,7 +2,7 @@ package core
 
 object Evaluator {
 
-  case class QueryResult(qid: String, retrievedPids: Seq[String])
+  case class QueryResult(qid: String, retrievedPids: Seq[String], queryTimeMs: Long = 0L)
 
   case class Metrics(precisionAtK: Double, recallAtK: Double, reciprocalRank: Double)
 
@@ -23,7 +23,7 @@ object Evaluator {
     val recallAtK    = truePositives.toDouble / relevantPids.size
 
     // Reciprocal rank: position of first relevant doc (1-indexed)
-    val rankOfFirst = retrievedPids.indexWhere(pid => relevantPids.contains(pid))
+    val rankOfFirst    = retrievedPids.indexWhere(pid => relevantPids.contains(pid))
     val reciprocalRank = if (rankOfFirst < 0) 0.0 else 1.0 / (rankOfFirst + 1)
 
     Metrics(precisionAtK, recallAtK, reciprocalRank)
@@ -41,10 +41,17 @@ object Evaluator {
       computeMetrics(qr.retrievedPids, relevantPids, k)
     }
 
-    val n = metricsPerQuery.size.toDouble
+    val n             = metricsPerQuery.size.toDouble
     val meanPrecision = metricsPerQuery.map(_.precisionAtK).sum / n
     val meanRecall    = metricsPerQuery.map(_.recallAtK).sum / n
     val mrr           = metricsPerQuery.map(_.reciprocalRank).sum / n
+
+    // Report avg query time if available
+    val timings = results.map(_.queryTimeMs)
+    if (timings.exists(_ > 0)) {
+      val avgMs = timings.sum.toDouble / timings.length
+      println(f"  Avg query time: $avgMs%.1f ms")
+    }
 
     (meanPrecision, meanRecall, mrr)
   }

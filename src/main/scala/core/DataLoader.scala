@@ -11,7 +11,6 @@ object DataLoader {
     Logger.getLogger("akka").setLevel(Level.WARN)
     SparkSession.builder()
       .appName(appName)
-      .master("local[*]")
       .getOrCreate()
   }
 

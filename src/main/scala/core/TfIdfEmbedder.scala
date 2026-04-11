@@ -1,13 +1,16 @@
 package core
 
 import org.apache.log4j.{Level, Logger}
-import org.apache.spark.ml.Pipeline
-import org.apache.spark.ml.feature.{HashingTF, IDF, IDFModel, RegexTokenizer, StopWordsRemover}
+import org.apache.spark.ml.feature.{HashingTF, IDF, IDFModel}
 import org.apache.spark.ml.linalg.{Vector, Vectors}
 import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.apache.spark.sql.types._
+
+import java.io.{File, PrintWriter}
+import scala.io.Source
 
 object TfIdfEmbedder {
+
+  private val NumFeatures = 65536
 
   def buildAndSave(
       spark: SparkSession,
@@ -19,80 +22,74 @@ object TfIdfEmbedder {
 
     val passages = spark.read.parquet(passagesPath)
 
-    val tokenizer = new RegexTokenizer()
-      .setInputCol("passage_text")
-      .setOutputCol("tokens")
-      .setPattern("\\W+")
-
-    val remover = new StopWordsRemover()
-      .setInputCol("tokens")
-      .setOutputCol("filtered")
+    // Use TextPreprocessor for tokenization + stop word removal
+    val tokenized = TextPreprocessor.transform(passages, "passage_text", "filtered_tokens")
 
     val hashingTF = new HashingTF()
-      .setNumFeatures(65536)
-      .setInputCol("filtered")
+      .setNumFeatures(NumFeatures)
+      .setInputCol("filtered_tokens")
       .setOutputCol("tf")
 
     val idf = new IDF()
       .setInputCol("tf")
-      .setOutputCol("tfidf")
+      .setOutputCol("features")
 
-    val pipeline = new Pipeline()
-      .setStages(Array(tokenizer, remover, hashingTF, idf))
+    println("Computing TF...")
+    val tfDf = hashingTF.transform(tokenized)
 
-    println("Fitting TF-IDF pipeline...")
-    val model = pipeline.fit(passages)
+    println("Fitting IDF...")
+    val idfModel = idf.fit(tfDf)
 
-    val transformed = model.transform(passages)
+    val transformed = idfModel.transform(tfDf)
 
     println(s"Saving TF-IDF embeddings to $outputDir ...")
-    transformed.select("pid", "passage_text", "tfidf")
+    transformed.select("pid", "passage_text", "features")
       .write.mode("overwrite").parquet(outputDir)
 
-    // Extract sub-models for saving
-    val idfModel = model.stages(3).asInstanceOf[IDFModel]
-    idfModel.save(modelDir + "/idf")
+    // Save IDF model
+    new File(modelDir).mkdirs()
+    idfModel.write.overwrite().save(modelDir + "/tfidf-idf")
 
-    // HashingTF is a Transformer (not a Model), save it via the pipeline stage
-    hashingTF.save(modelDir + "/hashingTF")
+    // Save numFeatures instead of HashingTF (HashingTF is not MLReadable)
+    val pw = new PrintWriter(new File(modelDir + "/tfidf-numfeatures.txt"))
+    pw.println(NumFeatures.toString)
+    pw.close()
 
-    println(s"Saved IDF model to $modelDir/idf")
-    println(s"Saved HashingTF to $modelDir/hashingTF")
+    println(s"Saved IDF model to $modelDir/tfidf-idf")
+    println(s"Saved numFeatures to $modelDir/tfidf-numfeatures.txt")
   }
 
   def embedQuery(
       spark: SparkSession,
       query: String,
-      hashingTF: HashingTF,
+      numFeatures: Int,
       idfModel: IDFModel
   ): Vector = {
     import spark.implicits._
 
-    val queryDF = Seq((query)).toDF("query_text")
+    val queryDF = Seq(Tuple1(query)).toDF("query_text")
+    val tokenized = TextPreprocessor.transform(queryDF, "query_text", "filtered_tokens")
 
-    val tokenizer = new RegexTokenizer()
-      .setInputCol("query_text")
-      .setOutputCol("tokens")
-      .setPattern("\\W+")
-
-    val remover = new StopWordsRemover()
-      .setInputCol("tokens")
-      .setOutputCol("filtered")
-
-    val htf = hashingTF
-      .setInputCol("filtered")
+    val htf = new HashingTF()
+      .setNumFeatures(numFeatures)
+      .setInputCol("filtered_tokens")
       .setOutputCol("tf")
 
     val idfStage = idfModel
       .setInputCol("tf")
-      .setOutputCol("tfidf")
+      .setOutputCol("features")
 
-    val tokenized  = tokenizer.transform(queryDF)
-    val filtered   = remover.transform(tokenized)
-    val tfed       = htf.transform(filtered)
-    val tfidfed    = idfStage.transform(tfed)
+    val tfed    = htf.transform(tokenized)
+    val tfidfed = idfStage.transform(tfed)
 
-    tfidfed.select("tfidf").head().getAs[Vector](0)
+    tfidfed.select("features").head().getAs[Vector](0)
+  }
+
+  /** Load numFeatures from the stats file saved during buildAndSave. */
+  def loadNumFeatures(modelDir: String): Int = {
+    val src = Source.fromFile(modelDir + "/tfidf-numfeatures.txt")
+    try src.getLines().next().trim.toInt
+    finally src.close()
   }
 
   def main(args: Array[String]): Unit = {
@@ -119,7 +116,6 @@ object TfIdfEmbedder {
 
     val spark = SparkSession.builder()
       .appName("TfIdfEmbedder")
-      .master("local[*]")
       .getOrCreate()
 
     buildAndSave(spark, inputPath, outputDir, modelDir)
