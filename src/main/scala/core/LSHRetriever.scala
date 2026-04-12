@@ -213,7 +213,12 @@ class LSHRetriever(
       val numFeatures = TfIdfEmbedder.loadNumFeatures(modelDir)
       TfIdfEmbedder.embedQuery(spark, queryText, numFeatures, IDFModel.load(modelDir + "/tfidf-idf"))
     case "bm25"    => BM25Embedder.embedQuery(spark, queryText, modelDir)
-    case "word2vec" => Word2VecEmbedder.embedQuery(spark, queryText, modelDir)
+    case "word2vec"     => Word2VecEmbedder.embedQuery(spark, queryText, modelDir)
+    case "word2vec-sif" =>
+      Word2VecEmbedder.embedQuerySIF(queryText,
+        Word2VecEmbedder.loadWordVecs(modelDir),
+        Word2VecEmbedder.loadSIFWeights(modelDir),
+        Word2VecEmbedder.loadSIFPC(modelDir))
     case "minilm"  =>
       throw new UnsupportedOperationException("MiniLM LSH: use batchRetrieve with precomputed embeddings")
   }
@@ -246,6 +251,13 @@ class LSHRetriever(
         w2vStage.transform(tokenized)
           .select("qid", "features").collect()
           .map(r => r.getString(0) -> r.getAs[Vector](1))
+
+      case "word2vec-sif" =>
+        // Fully local — load SIF state once, encode all queries without a Spark job
+        val wvMap = Word2VecEmbedder.loadWordVecs(modelDir)
+        val sifW  = Word2VecEmbedder.loadSIFWeights(modelDir)
+        val pc    = Word2VecEmbedder.loadSIFPC(modelDir)
+        Word2VecEmbedder.embedAllQueriesSIF(queries, wvMap, sifW, pc)
 
       case "minilm" =>
         require(queryEmbeddingsPath.nonEmpty, "--query-embeddings required for minilm LSH")

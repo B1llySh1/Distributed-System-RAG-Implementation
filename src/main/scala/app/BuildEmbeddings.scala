@@ -62,6 +62,11 @@ object BuildEmbeddings {
         println(s"Building Word2Vec embeddings from $inputPath ...")
         Word2VecEmbedder.buildAndSave(spark, inputPath, outputDir, modelDir)
 
+      case "word2vec-sif" =>
+        require(modelDir.nonEmpty, "--model is required for method=word2vec-sif")
+        println(s"Building Word2Vec-SIF embeddings from $inputPath ...")
+        Word2VecEmbedder.buildAndSaveSIF(spark, inputPath, outputDir, modelDir)
+
       case "minilm-passage" =>
         require(passagesPath.nonEmpty, "--passages is required for method=minilm-passage")
         println(s"Loading MiniLM passage embeddings from TSV $inputPath ...")
@@ -73,7 +78,7 @@ object BuildEmbeddings {
 
       case other =>
         throw new IllegalArgumentException(
-          s"Unknown --method: $other. Expected: tfidf, bm25, word2vec, minilm-passage, minilm-query")
+          s"Unknown --method: $other. Expected: tfidf, bm25, word2vec, word2vec-sif, minilm-passage, minilm-query")
     }
 
     println(s"Embeddings saved to $outputDir")

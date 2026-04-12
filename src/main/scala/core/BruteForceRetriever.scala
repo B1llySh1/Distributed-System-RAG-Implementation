@@ -39,6 +39,10 @@ class BruteForceRetriever(
   private lazy val cachedIdfModel:    IDFModel          = IDFModel.load(modelDir + "/tfidf-idf")
   private lazy val cachedW2vModel:    Word2VecModel     = Word2VecModel.load(modelDir + "/word2vec")
   private lazy val cachedBm25Stats:   BM25Embedder.BM25Stats = BM25Embedder.loadStats(spark, modelDir)
+  // SIF-specific caches — only initialised when embeddingMethod == "word2vec-sif"
+  private lazy val cachedWordVecsMap: Map[String, Array[Double]] = Word2VecEmbedder.loadWordVecs(modelDir)
+  private lazy val cachedSIFWeights:  Map[String, Double]        = Word2VecEmbedder.loadSIFWeights(modelDir)
+  private lazy val cachedSIFPC:       Option[Array[Double]]      = Word2VecEmbedder.loadSIFPC(modelDir)
 
   // Encode a single query (used for interactive search) — no model reloads
   private def encodeQuery(queryText: String): Vector = embeddingMethod match {
@@ -48,6 +52,8 @@ class BruteForceRetriever(
       BM25Embedder.embedQuery(spark, queryText, modelDir, Some(cachedBm25Stats))
     case "word2vec" =>
       Word2VecEmbedder.embedQuery(spark, queryText, modelDir, Some(cachedW2vModel))
+    case "word2vec-sif" =>
+      Word2VecEmbedder.embedQuerySIF(queryText, cachedWordVecsMap, cachedSIFWeights, cachedSIFPC)
     case "minilm" =>
       throw new UnsupportedOperationException(
         "MiniLM interactive search requires precomputed query embeddings")
@@ -94,6 +100,10 @@ class BruteForceRetriever(
         w2vStage.transform(tokenized)
           .select("qid", "features").collect()
           .map(r => r.getString(0) -> r.getAs[Vector](1))
+
+      case "word2vec-sif" =>
+        // Fully local — no Spark job needed for query encoding
+        Word2VecEmbedder.embedAllQueriesSIF(queries, cachedWordVecsMap, cachedSIFWeights, cachedSIFPC)
 
       case "minilm" =>
         require(queryEmbeddingsPath.nonEmpty, "queryEmbeddingsPath required for minilm")
