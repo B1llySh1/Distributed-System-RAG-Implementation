@@ -18,12 +18,19 @@ mvn clean package -q
 
 ## Data Setup
 
-Download MS MARCO from https://microsoft.github.io/msmarco/ and place:
+Download MS MARCO from https://microsoft.github.io/msmarco/ and place the full files under `data/msmarco/`.
+Then create the subsets used in this project:
+
+```bash
+# First 200k passages
+head -n 200000 data/msmarco/collection.tsv > data/msmarco/collection.subset.tsv
+
+# Qrels that fall within the 200k passage range
+head -n 6218 data/msmarco/qrels.train.tsv > data/msmarco/qrels.train.subset.tsv
 ```
-data/msmarco/collection.subset.tsv   # 200k passages
-data/msmarco/queries.train.tsv
-data/msmarco/qrels.train.subset.tsv
-```
+
+The full `queries.train.tsv` is used as-is — EvalApp automatically filters to only queries
+that have a matching entry in the qrels subset.
 
 Convert to Parquet (run once):
 ```bash
