@@ -10,41 +10,25 @@ trait Retriever {
 object RetrieverUtils {
 
   def cosineSimilarity(v1: Vector, v2: Vector): Double = {
-    var dot   = 0.0
-    var norm1 = 0.0
-    var norm2 = 0.0
+    var dot = 0.0; var norm1 = 0.0; var norm2 = 0.0
 
     (v1, v2) match {
       case (sv1: SparseVector, sv2: SparseVector) =>
-        val indices1 = sv1.indices
-        val values1  = sv1.values
-        val indices2 = sv2.indices
-        val values2  = sv2.values
-
-        var p = 0
-        var q = 0
-        while (p < indices1.length && q < indices2.length) {
-          if (indices1(p) == indices2(q)) {
-            dot += values1(p) * values2(q)
-            p += 1
-            q += 1
-          } else if (indices1(p) < indices2(q)) {
-            p += 1
-          } else {
-            q += 1
-          }
+        // Two-pointer merge on sorted index arrays — avoids converting to dense
+        var p = 0; var q = 0
+        while (p < sv1.indices.length && q < sv2.indices.length) {
+          if      (sv1.indices(p) == sv2.indices(q)) { dot += sv1.values(p) * sv2.values(q); p += 1; q += 1 }
+          else if (sv1.indices(p) <  sv2.indices(q)) { p += 1 }
+          else                                        { q += 1 }
         }
-        values1.foreach(v => norm1 += v * v)
-        values2.foreach(v => norm2 += v * v)
+        sv1.values.foreach(v => norm1 += v * v)
+        sv2.values.foreach(v => norm2 += v * v)
 
       case _ =>
-        val arr1 = v1.toArray
-        val arr2 = v2.toArray
-        var idx  = 0
-        while (idx < arr1.length) {
-          dot   += arr1(idx) * arr2(idx)
-          norm1 += arr1(idx) * arr1(idx)
-          norm2 += arr2(idx) * arr2(idx)
+        val a1  = v1.toArray; val a2 = v2.toArray
+        var idx = 0
+        while (idx < a1.length) {
+          dot += a1(idx) * a2(idx); norm1 += a1(idx) * a1(idx); norm2 += a2(idx) * a2(idx)
           idx += 1
         }
     }

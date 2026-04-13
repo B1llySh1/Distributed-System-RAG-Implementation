@@ -16,7 +16,6 @@
     <scala.version>2.12.18</scala.version>
     <scala.compat.version>2.12</scala.compat.version>
     <spark.version>3.5.1</spark.version>
-    <djl.version>0.25.0</djl.version>
   </properties>
 
   <dependencies>
@@ -47,38 +46,16 @@
       <version>${scala.version}</version>
       <scope>provided</scope>
     </dependency>
-
-    <!-- DJL — bundled into the fat JAR -->
-    <dependency>
-      <groupId>ai.djl</groupId>
-      <artifactId>api</artifactId>
-      <version>${djl.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>ai.djl.huggingface</groupId>
-      <artifactId>tokenizers</artifactId>
-      <version>${djl.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>ai.djl.onnxruntime</groupId>
-      <artifactId>onnxruntime-engine</artifactId>
-      <version>${djl.version}</version>
-    </dependency>
   </dependencies>
 
   <build>
     <plugins>
-      <!--
-        Scala Maven Plugin — compiles src/main/scala.
-        The add-source goal registers src/main/scala as an additional source root
-        so Maven's compiler plugin also sees src/main/java (the default).
-      -->
+      <!-- Scala Maven Plugin — compiles src/main/scala -->
       <plugin>
         <groupId>net.alchim31.maven</groupId>
         <artifactId>scala-maven-plugin</artifactId>
         <version>4.9.1</version>
         <executions>
-          <!-- Register src/main/scala and compile Scala before Java -->
           <execution>
             <id>scala-compile-first</id>
             <phase>process-resources</phase>
@@ -90,35 +67,16 @@
           <execution>
             <id>scala-test-compile</id>
             <phase>process-test-resources</phase>
-            <goals>
-              <goal>testCompile</goal>
-            </goals>
+            <goals><goal>testCompile</goal></goals>
           </execution>
         </executions>
         <configuration>
           <scalaVersion>${scala.version}</scalaVersion>
-          <args>
-            <arg>-target:jvm-1.8</arg>
-          </args>
+          <args><arg>-target:jvm-1.8</arg></args>
         </configuration>
       </plugin>
 
-      <!-- Java compiler — picks up src/main/java (Maven default) -->
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-compiler-plugin</artifactId>
-        <version>3.12.1</version>
-        <configuration>
-          <source>11</source>
-          <target>11</target>
-        </configuration>
-      </plugin>
-
-      <!--
-        Shade plugin — produces a fat JAR at
-        target/rag-project-assembly.jar ready for spark-submit.
-        Spark / Scala are provided, so they are excluded.
-      -->
+      <!-- Shade plugin — fat JAR for spark-submit -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-shade-plugin</artifactId>
@@ -142,16 +100,13 @@
                 </filter>
               </filters>
               <relocations>
-                <!-- Shade Jackson to avoid conflicts with Spark's bundled version -->
+                <!-- Avoid Jackson version conflicts with Spark's bundled copy -->
                 <relocation>
                   <pattern>com.fasterxml.jackson</pattern>
                   <shadedPattern>shaded.com.fasterxml.jackson</shadedPattern>
                 </relocation>
               </relocations>
               <transformers>
-                <!-- Merge META-INF/services for SPI providers (e.g. DJL engines) -->
-                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
-                <!-- Merge Akka / Spark reference.conf files -->
                 <transformer implementation="org.apache.maven.plugins.shade.resource.AppendingTransformer">
                   <resource>reference.conf</resource>
                 </transformer>

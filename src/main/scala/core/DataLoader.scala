@@ -6,57 +6,38 @@ import org.apache.spark.sql.types._
 
 object DataLoader {
 
-  def createSpark(appName: String): SparkSession = {
+  def loadPassages(spark: SparkSession, path: String): DataFrame =
+    spark.read.option("delimiter", "\t").option("header", "false")
+      .schema(StructType(Seq(
+        StructField("pid", StringType),
+        StructField("passage_text", StringType)
+      ))).csv(path)
+
+  def loadQueries(spark: SparkSession, path: String): DataFrame =
+    spark.read.option("delimiter", "\t").option("header", "false")
+      .schema(StructType(Seq(
+        StructField("qid", StringType),
+        StructField("query_text", StringType)
+      ))).csv(path)
+
+  def loadQrels(spark: SparkSession, path: String): DataFrame =
+    spark.read.option("delimiter", "\t").option("header", "false")
+      .schema(StructType(Seq(
+        StructField("qid", StringType),
+        StructField("dummy", IntegerType),
+        StructField("pid", StringType),
+        StructField("relevance", IntegerType)
+      ))).csv(path)
+
+  // Preprocess TSV files into Parquet once, so all downstream jobs read efficiently.
+  def main(args: Array[String]): Unit = {
     Logger.getLogger("org").setLevel(Level.WARN)
     Logger.getLogger("akka").setLevel(Level.WARN)
-    SparkSession.builder()
-      .appName(appName)
-      .getOrCreate()
-  }
 
-  def loadPassages(spark: SparkSession, path: String): DataFrame = {
-    val schema = StructType(Seq(
-      StructField("pid", StringType, nullable = true),
-      StructField("passage_text", StringType, nullable = true)
-    ))
-    spark.read
-      .option("delimiter", "\t")
-      .option("header", "false")
-      .schema(schema)
-      .csv(path)
-  }
-
-  def loadQueries(spark: SparkSession, path: String): DataFrame = {
-    val schema = StructType(Seq(
-      StructField("qid", StringType, nullable = true),
-      StructField("query_text", StringType, nullable = true)
-    ))
-    spark.read
-      .option("delimiter", "\t")
-      .option("header", "false")
-      .schema(schema)
-      .csv(path)
-  }
-
-  def loadQrels(spark: SparkSession, path: String): DataFrame = {
-    val schema = StructType(Seq(
-      StructField("qid", StringType, nullable = true),
-      StructField("dummy", IntegerType, nullable = true),
-      StructField("pid", StringType, nullable = true),
-      StructField("relevance", IntegerType, nullable = true)
-    ))
-    spark.read
-      .option("delimiter", "\t")
-      .option("header", "false")
-      .schema(schema)
-      .csv(path)
-  }
-
-  def main(args: Array[String]): Unit = {
     var passagesPath = ""
-    var queriesPath = ""
-    var qrelsPath = ""
-    var outputDir = ""
+    var queriesPath  = ""
+    var qrelsPath    = ""
+    var outputDir    = ""
 
     var i = 0
     while (i < args.length) {
@@ -74,7 +55,8 @@ object DataLoader {
     require(qrelsPath.nonEmpty,    "--qrels is required")
     require(outputDir.nonEmpty,    "--output is required")
 
-    val spark = createSpark("DataLoader")
+    Logger.getLogger("org").setLevel(Level.WARN)
+    val spark = SparkSession.builder().appName("DataLoader").getOrCreate()
 
     val passages = loadPassages(spark, passagesPath)
     val queries  = loadQueries(spark, queriesPath)
@@ -84,10 +66,9 @@ object DataLoader {
     queries.write.mode("overwrite").parquet(outputDir + "/queries")
     qrels.write.mode("overwrite").parquet(outputDir + "/qrels")
 
-    println(s"Passages count : ${passages.count()}")
-    println(s"Queries count  : ${queries.count()}")
-    println(s"Qrels count    : ${qrels.count()}")
-    println(s"Saved parquet files to $outputDir")
+    println(s"Passages: ${passages.count()}")
+    println(s"Queries : ${queries.count()}")
+    println(s"Qrels   : ${qrels.count()}")
 
     spark.stop()
   }

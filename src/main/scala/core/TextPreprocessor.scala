@@ -2,39 +2,28 @@ package core
 
 import org.apache.spark.ml.feature.{RegexTokenizer, StopWordsRemover}
 import org.apache.spark.sql.DataFrame
-import org.apache.spark.sql.functions._
 
 object TextPreprocessor {
 
   private val stopWords = StopWordsRemover.loadDefaultStopWords("english").toSet
 
-  /**
-   * Transform a DataFrame: inputCol (String) -> outputCol (Array[String] of filtered tokens).
-   * Uses RegexTokenizer (\\W+, lowercase=true) then StopWordsRemover.
-   * Intermediate column is named "_tp_raw_tokens" (dropped from output).
-   */
+  // Tokenize a DataFrame column: split on non-word chars, lowercase, remove stop words.
+  // "_tp_raw" is a temp column dropped before returning.
   def transform(df: DataFrame, inputCol: String, outputCol: String): DataFrame = {
     val tokenizer = new RegexTokenizer()
       .setInputCol(inputCol)
-      .setOutputCol("_tp_raw_tokens")
+      .setOutputCol("_tp_raw")
       .setPattern("\\W+")
       .setToLowercase(true)
 
     val remover = new StopWordsRemover()
-      .setInputCol("_tp_raw_tokens")
+      .setInputCol("_tp_raw")
       .setOutputCol(outputCol)
 
-    val tokenized = tokenizer.transform(df)
-    val filtered  = remover.transform(tokenized)
-    filtered.drop("_tp_raw_tokens")
+    remover.transform(tokenizer.transform(df)).drop("_tp_raw")
   }
 
-  /**
-   * Tokenize a single string on the driver (for local query encoding, BM25 stats).
-   */
-  def tokenize(text: String): Array[String] = {
-    text.toLowerCase
-      .split("\\W+")
-      .filter(t => t.nonEmpty && !stopWords.contains(t))
-  }
+  // Local tokenization for query encoding on the driver — same logic as the Spark path.
+  def tokenize(text: String): Array[String] =
+    text.toLowerCase.split("\\W+").filter(t => t.nonEmpty && !stopWords.contains(t))
 }

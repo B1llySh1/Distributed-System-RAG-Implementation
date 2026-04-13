@@ -1,6 +1,6 @@
 package core
 
-import org.apache.spark.ml.feature.{IDFModel, Word2VecModel}
+import org.apache.spark.ml.feature.{HashingTF, IDFModel, Word2VecModel}
 import org.apache.spark.ml.linalg.{DenseVector, SparseVector, Vector}
 import org.apache.spark.sql.SparkSession
 
@@ -8,133 +8,85 @@ class BruteForceRetriever(
     spark: SparkSession,
     val embeddingMethod: String,
     embeddingsPath: String,
-    modelDir: String,
-    queryEmbeddingsPath: String = ""
+    modelDir: String
 ) extends Retriever {
 
   val name = s"BruteForce-$embeddingMethod"
 
-  // Lazy-load passage data to driver
-  private lazy val (pids, texts, vecs, norms) = {
-    val rows = spark.read.parquet(embeddingsPath)
-      .select("pid", "passage_text", "features")
-      .collect()
-    val ps = rows.map(_.getString(0))
-    val ts = rows.map(_.getString(1))
-    val vs = rows.map(_.getAs[Vector](2))
-    val ns = vs.map(v => math.sqrt(v match {
+  // Pull all passage vectors to the driver once — 200K × 100-dim fits in memory easily
+  private lazy val (pids, vecs, norms) = {
+    val rows = spark.read.parquet(embeddingsPath).select("pid", "features").collect()
+    val ps   = rows.map(_.getString(0))
+    val vs   = rows.map(_.getAs[Vector](1))
+    val ns   = vs.map(v => math.sqrt(v match {
       case sv: SparseVector => sv.values.map(x => x * x).sum
       case dv: DenseVector  => dv.values.map(x => x * x).sum
     }))
-    (ps, ts, vs, ns)
+    (ps, vs, ns)
   }
 
-  def retrieve(queryText: String, k: Int): List[(String, Double)] = {
-    val queryVec = encodeQuery(queryText)
-    scoreAndRank(queryVec, k)
-  }
+  // Models loaded once on first use and reused for all interactive queries
+  private lazy val cachedNumFeatures = TfIdfEmbedder.loadNumFeatures(modelDir)
+  private lazy val cachedIdfModel    = IDFModel.load(modelDir + "/tfidf-idf")
+  private lazy val cachedW2vModel    = Word2VecModel.load(modelDir + "/word2vec")
+  private lazy val cachedBm25Stats   = BM25Embedder.loadStats(spark, modelDir)
+  private lazy val cachedWordVecs    = Word2VecEmbedder.loadWordVecs(modelDir)
+  private lazy val cachedSIFWeights  = Word2VecEmbedder.loadSIFWeights(modelDir)
+  private lazy val cachedSIFPC       = Word2VecEmbedder.loadSIFPC(modelDir)
 
-  // Models/stats loaded once lazily, reused across all queries
-  private lazy val cachedNumFeatures: Int              = TfIdfEmbedder.loadNumFeatures(modelDir)
-  private lazy val cachedIdfModel:    IDFModel          = IDFModel.load(modelDir + "/tfidf-idf")
-  private lazy val cachedW2vModel:    Word2VecModel     = Word2VecModel.load(modelDir + "/word2vec")
-  private lazy val cachedBm25Stats:   BM25Embedder.BM25Stats = BM25Embedder.loadStats(spark, modelDir)
-  // SIF-specific caches — only initialised when embeddingMethod == "word2vec-sif"
-  private lazy val cachedWordVecsMap: Map[String, Array[Double]] = Word2VecEmbedder.loadWordVecs(modelDir)
-  private lazy val cachedSIFWeights:  Map[String, Double]        = Word2VecEmbedder.loadSIFWeights(modelDir)
-  private lazy val cachedSIFPC:       Option[Array[Double]]      = Word2VecEmbedder.loadSIFPC(modelDir)
+  def retrieve(queryText: String, k: Int): List[(String, Double)] =
+    scoreAndRank(encodeQuery(queryText), k)
 
-  // Encode a single query (used for interactive search) — no model reloads
   private def encodeQuery(queryText: String): Vector = embeddingMethod match {
-    case "tfidf" =>
-      TfIdfEmbedder.embedQuery(spark, queryText, cachedNumFeatures, cachedIdfModel)
-    case "bm25" =>
-      BM25Embedder.embedQuery(spark, queryText, modelDir, Some(cachedBm25Stats))
-    case "word2vec" =>
-      Word2VecEmbedder.embedQuery(spark, queryText, modelDir, Some(cachedW2vModel))
-    case "word2vec-sif" =>
-      Word2VecEmbedder.embedQuerySIF(queryText, cachedWordVecsMap, cachedSIFWeights, cachedSIFPC)
-    case "minilm" =>
-      throw new UnsupportedOperationException(
-        "MiniLM interactive search requires precomputed query embeddings")
+    case "tfidf"       => TfIdfEmbedder.embedQuery(spark, queryText, cachedNumFeatures, cachedIdfModel)
+    case "bm25"        => BM25Embedder.embedQuery(spark, queryText, modelDir, Some(cachedBm25Stats))
+    case "word2vec"    => Word2VecEmbedder.embedQuery(spark, queryText, modelDir, Some(cachedW2vModel))
+    case "word2vec-sif"=> Word2VecEmbedder.embedQuerySIF(queryText, cachedWordVecs, cachedSIFWeights, cachedSIFPC)
+    case other         => throw new IllegalArgumentException(s"Unknown embedding: $other")
   }
 
-  /**
-   * Batch retrieve: encode all queries in ONE Spark job then score locally.
-   * Returns Map[qid -> List[(pid, score)]]
-   */
+  // Encode all queries in one Spark job, then score all passages locally.
   def batchRetrieve(queries: Seq[(String, String)], k: Int): Map[String, List[(String, Double)]] = {
     import spark.implicits._
 
-    // Force passage loading
-    val n = pids.length
-    println(s"  [$name] $n passages loaded. Encoding ${queries.length} queries...")
+    println(s"  [$name] ${pids.length} passages loaded. Encoding ${queries.length} queries...")
 
-    // Encode all queries
     val queryVectors: Seq[(String, Vector)] = embeddingMethod match {
-
       case "tfidf" =>
-        val numFeatures = TfIdfEmbedder.loadNumFeatures(modelDir)
-        val idfModel    = IDFModel.load(modelDir + "/tfidf-idf")
-        val queryDF     = queries.toDF("qid", "query_text")
-        val tokenized   = TextPreprocessor.transform(queryDF, "query_text", "filtered_tokens")
-        import org.apache.spark.ml.feature.HashingTF
-        val htf = new HashingTF()
-          .setNumFeatures(numFeatures)
-          .setInputCol("filtered_tokens")
-          .setOutputCol("tf")
-        val idfStage = idfModel.setInputCol("tf").setOutputCol("features")
+        val htf      = new HashingTF().setNumFeatures(cachedNumFeatures).setInputCol("filtered_tokens").setOutputCol("tf")
+        val idfStage = cachedIdfModel.setInputCol("tf").setOutputCol("features")
+        val tokenized = TextPreprocessor.transform(queries.toDF("qid", "query_text"), "query_text", "filtered_tokens")
         idfStage.transform(htf.transform(tokenized))
           .select("qid", "features").collect()
           .map(r => r.getString(0) -> r.getAs[Vector](1))
 
       case "bm25" =>
-        // HashingTF applied to all queries in ONE Spark job; BM25 formula applied locally
         BM25Embedder.embedAllQueries(spark, queries, cachedBm25Stats)
 
       case "word2vec" =>
-        val w2vModel  = Word2VecModel.load(modelDir + "/word2vec")
-        val queryDF   = queries.toDF("qid", "query_text")
-        val tokenized = TextPreprocessor.transform(queryDF, "query_text", "filtered_tokens")
-        val w2vStage  = w2vModel.setInputCol("filtered_tokens").setOutputCol("features")
-        w2vStage.transform(tokenized)
-          .select("qid", "features").collect()
+        val tokenized = TextPreprocessor.transform(queries.toDF("qid", "query_text"), "query_text", "filtered_tokens")
+        cachedW2vModel.setInputCol("filtered_tokens").setOutputCol("features")
+          .transform(tokenized).select("qid", "features").collect()
           .map(r => r.getString(0) -> r.getAs[Vector](1))
 
       case "word2vec-sif" =>
-        // Fully local — no Spark job needed for query encoding
-        Word2VecEmbedder.embedAllQueriesSIF(queries, cachedWordVecsMap, cachedSIFWeights, cachedSIFPC)
+        // Fully local — word vecs and SIF weights already on the driver
+        Word2VecEmbedder.embedAllQueriesSIF(queries, cachedWordVecs, cachedSIFWeights, cachedSIFPC)
 
-      case "minilm" =>
-        require(queryEmbeddingsPath.nonEmpty, "queryEmbeddingsPath required for minilm")
-        val qidSet = queries.map(_._1).toSet
-        spark.read.parquet(queryEmbeddingsPath)
-          .select("qid", "features").collect()
-          .filter(r => qidSet.contains(r.getString(0)))
-          .map(r => r.getString(0) -> r.getAs[Vector](1))
-
-      case other =>
-        throw new IllegalArgumentException(s"Unknown embedding method: $other")
+      case other => throw new IllegalArgumentException(s"Unknown embedding: $other")
     }
 
-    // Score all passages locally
     val t0 = System.currentTimeMillis()
-    val result = queryVectors.map { case (qid, queryVec) =>
-      qid -> scoreAndRank(queryVec, k)
-    }.toMap
-
+    val result = queryVectors.map { case (qid, qvec) => qid -> scoreAndRank(qvec, k) }.toMap
     val elapsed = System.currentTimeMillis() - t0
-    println(f"  [$name] Ranked in ${elapsed / 1000.0}%.1f s " +
-            f"(${elapsed.toDouble / queryVectors.length}%.1f ms/query avg)")
+    println(f"  [$name] Ranked in ${elapsed / 1000.0}%.1f s (${elapsed.toDouble / queryVectors.length}%.1f ms/query avg)")
     result
   }
 
   private def scoreAndRank(queryVec: Vector, k: Int): List[(String, Double)] = {
-    val n = pids.length
-    val heap = new java.util.PriorityQueue[(Double, Int)](k + 1,
-      Ordering.by[(Double, Int), Double](_._1))
+    val heap = new java.util.PriorityQueue[(Double, Int)](k + 1, Ordering.by[(Double, Int), Double](_._1))
     var i = 0
-    while (i < n) {
+    while (i < pids.length) {
       val score = RetrieverUtils.cosineSimilarity(queryVec, vecs(i))
       if (heap.size() < k) heap.offer((score, i))
       else if (score > heap.peek()._1) { heap.poll(); heap.offer((score, i)) }
@@ -142,11 +94,7 @@ class BruteForceRetriever(
     }
     val result = new Array[(String, Double)](heap.size())
     var hi = heap.size() - 1
-    while (!heap.isEmpty) {
-      val (score, idx) = heap.poll()
-      result(hi) = (pids(idx), score)
-      hi -= 1
-    }
+    while (!heap.isEmpty) { val (s, idx) = heap.poll(); result(hi) = (pids(idx), s); hi -= 1 }
     result.toList
   }
 }
